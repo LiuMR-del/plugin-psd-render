@@ -6,7 +6,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## 项目概述
 
-本地桌面工具（Flet GUI），读取订单 Excel，按 SKU（铝板画模式下按 SKU + 严格方向尺寸）匹配 PSD/PSB 模板，驱动 Photoshop 替换文字/切换图层显隐/替换图片后批量导出 PNG。用户文档：`README.md`、`AI安装与更新指令.md`（复制给 AI 的安装/更新/发布指令）、`操作步骤.txt`（给使用者的精简步骤）、`使用说明.txt`（5.5 为给美工的铝板画模板规范）；铝板画自动流程的方案与变更记录：`铝板画自动出图实施方案.md`（9.9 为标准模板规范）；实机验证记录：`实施验证结果-2026-10-10.md`（历史记录，只追加）。当前铝板画模板库：`~/Downloads/铝板画`（旧库 `铁皮画` 已停用）。
+本地桌面工具（Flet GUI），读取订单 Excel，按 SKU（铝板画模式下按 SKU + 严格方向尺寸）匹配 PSD/PSB 模板，驱动 Photoshop 替换文字/切换图层显隐/替换图片后批量导出 PNG。用户文档：`README.md`、`AI安装与更新指令.md`（复制给 AI 的安装/更新/发布指令）、`操作步骤.txt`（给使用者的精简步骤）、`使用说明.txt`（完整说明，2026-10-14 按铝板画主流程重写：第五章为给美工的模板规范，第六章为出图规则，普通模板流程压缩为附录）；铝板画自动流程的方案与变更记录：`铝板画自动出图实施方案.md`（9.9 为标准模板规范）；实机验证记录：`实施验证结果-2026-10-10.md`（历史记录，只追加）。当前铝板画模板库：`~/Downloads/铝板画`（旧库 `铁皮画` 已停用）。
 
 ## 常用命令
 
@@ -66,7 +66,8 @@ flet pack main.py --name PSD批量生图 --add-data "render.jsx;."   # Windows �
 
 ## 运行环境注意
 
-- Windows 分支（COM、taskkill、msvcrt 锁、字体注册表）未实机验证，验收清单见方案文档 9.11；`renderer` 写 `task.jsx` 必须带 BOM（`utf-8-sig`）。
+- Windows 已实机验证：自检、COM 连接与出图、Since/姓名同步（2026-10-14）。尚未在 Windows 上验证：开跑前问 Photoshop 字体（`photoshop_fonts` 的 COM 分支）、AI 安装/更新指令全流程、界面验收清单其余项（方案文档 9.11）。`renderer` 写 `task.jsx` 必须带 BOM（`utf-8-sig`）。
+- **用户文档要随功能同步**：改了界面操作、出图规则或提示文字，同步改 `使用说明.txt` 对应章节（必要时 `操作步骤.txt`），按“现在是什么样”写，不写成改动记录（日期和原因写进方案文档变更记录）；界面按钮名以 `main.py` 里的实际文字为准。
 - 渲染需要本机安装 Photoshop CC 2018+ 和模板所用字体（缺字体时 Photoshop 会静默替换，结果中 `fontWarnings` 会提示）。
 - macOS 需授予终端/应用控制 Photoshop 的「自动化」权限；首次 AppleEvent 超时可重启 Photoshop 后重试。
 - 渲染看门狗（`renderer`）：`ensure_photoshop_ready` 先单独启动并等 Photoshop 响应（300s）；`render.jsx` 每步往 `RESULT_PATH + ".progress"` 追加 `毫秒\t步骤`，`_watch` 在某步超过 `STALL_TIMEOUT`（180s）无进展或单张超过 `MAX_RENDER_SECONDS`（900s）时强杀 Photoshop 并重试 1 次，报错带步骤用时。Windows 上所有 COM 调用必须经 `_start_com_call`（线程内 `CoInitialize`）。JSX 按路径找图层统一走 `layerFinder`（子图层名按路径缓存），显隐只在与目标不同时才写（写 `visible` 会重绘）；不要回到逐项从根遍历、无条件写入（同一单 54 秒 → 4.5 秒）。

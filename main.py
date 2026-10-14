@@ -4060,6 +4060,10 @@ def main(page: ft.Page):
             missing_name_rows: list[int] = []
             generated_names: dict[str, list[int]] = {}
             for row in scope_rows:
+                # 只查本次会生成的订单: 待审核/缺模板/异常订单不出图,
+                # 它们的命名列为空不该挡住整批（2026-10-14 用户确认）
+                if not will_render(row):
+                    continue
                 vf = variant_field_for(row.sku)
                 field_value = row.values.get(vf, "") if vf else ""
                 row_templates = templates_for_row(row, field_value)
@@ -4116,7 +4120,7 @@ def main(page: ft.Page):
             if dups:
                 lines = "".join(f"\n  · {order} ({count} 行)"
                                 for order, count in sorted(dups.items()))
-                warning(f"以下交易编号有多行, 输出文件将互相覆盖:{lines}")
+                warning(f"以下交易编号有多行, 输出文件名相同; 生成时只出第一行, 后面的行判为失败（不会覆盖）:{lines}")
         return items
 
     def check_fonts_then_start():
