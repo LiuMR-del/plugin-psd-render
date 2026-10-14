@@ -1,0 +1,4 @@
+# run.bat / pack.bat 必须是 CRLF（LF 时 cmd 会错乱）；shell 脚本必须是 LF
+*.bat     text eol=crlf
+*.sh      text eol=lf
+*.command text eol=lf

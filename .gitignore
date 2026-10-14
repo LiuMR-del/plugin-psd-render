@@ -1,0 +1,28 @@
+# 运行环境与产物
+.venv/
+node_modules/
+build/
+dist/
+__pycache__/
+*.pyc
+*.spec
+.ruff_cache/
+.zcode/
+
+# 凭证永不进仓库（公开仓库）
+.env
+.env.*
+
+# 本机运行结果
+自检结果/
+使用说明.md
+
+# 针对特定日期订单的一次性脚本（含本机路径），只留在维护者本机
+fix_backfill_1012.py
+render_9_1012.py
+inspect_*.jsx
+
+# 系统
+.DS_Store
+._*
+*.swp

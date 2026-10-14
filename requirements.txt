@@ -1,0 +1,6 @@
+# 0.28.3 在 macOS 上 FilePicker 点击无反应(flet issue #5334), 固定 0.28.2
+flet==0.28.2
+openpyxl>=3.1
+psd-tools>=1.9
+python-dotenv>=1.0
+pywin32>=306; sys_platform == 'win32'
