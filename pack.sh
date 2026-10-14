@@ -18,7 +18,9 @@ import zipfile
 OUT = os.path.join("dist", "plugin-psd-render.zip")
 SKIP_DIRS = {".git", ".venv", "__pycache__", ".pycache", "build", "dist", "node_modules", "自检结果",
              ".ruff_cache", ".zcode"}
-SKIP_FILES = (".DS_Store", ".env", ".env.*", "*.pyc", "*.spec")
+SKIP_FILES = (".DS_Store", ".env", ".env.*", "*.pyc", "*.spec",
+              # 针对特定日期订单的一次性脚本(含本机路径), 与 .gitignore 一致, 不随包分发
+              "fix_backfill_1012.py", "render_9_1012.py", "inspect_*.jsx")
 
 os.makedirs("dist", exist_ok=True)
 if os.path.exists(OUT):
