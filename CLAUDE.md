@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python main.py        # 直接启动 GUI
 
 # 测试（均无需 Photoshop / GUI）
-.venv/bin/python selftest.py                                   # 主自测，自定义 check() 断言计数（当前 194 项；unittest 112 项）
+.venv/bin/python selftest.py                                   # 主自测，自定义 check() 断言计数（当前 194 项；unittest 116 项）
 .venv/bin/python -m unittest discover -p 'test_*.py'           # unittest 专项测试
 .venv/bin/python -m unittest test_order_pipeline.OrderPipelineTests.<test_name>   # 单个测试
 
@@ -35,7 +35,7 @@ flet pack main.py --name PSD批量生图 --add-data "render.jsx;."   # Windows �
 ### 两条业务流程共用一个渲染出口
 
 1. **普通模板流程**：`templates.py` 扫描 `{模板目录}/{SKU}/*.psd`（文件名 `-[变体值]` 表示变体）→ `excel_data.py` 解析 Excel 列 → `custom_fields.py` 解析 `定制信息` 文案并按编辑距离归组 → 用户在 GUI 中配置的图层别名/选择器/智能对象/图片映射（存于 `settings.py`）→ `renderer.render()`。
-2. **铝板画自动流程**：`order_intake.py` 规范化订单尺寸（有 cm 用 cm，否则按写的数字 `written_key` 匹配——毛毯 `50"x60"` 对 `（50×60）`，再按 inch 换算兜底；方向严格，`30x20` ≠ `20x30`）→ `templates.pick_by_size()` 匹配平铺模板文件名 `SKU(宽×高cm)`（`_SIZE_IN_FILENAME_RE`，兼容旧写法 `SKU（宽-高）`、全/半角括号混用）→ `local_candidates.py` 本地确定性匹配人物素材候选 → 仅歧义字段交给 `ai_client.py` → `ai_mapping.py` 校验 AI 输出 → 用户审核后存入 `template_profiles.py` → `order_pipeline.compile_plan()` 编译渲染参数 → `renderer.render()`。
+2. **铝板画自动流程**：`order_intake.py` 规范化订单尺寸（有 cm 用 cm，否则按写的数字 `written_key` 匹配——毛毯 `50"x60"` 对 `（50×60）`，再按 inch 换算兜底；方向严格，`30x20` ≠ `20x30`）→ `templates.pick_by_size()` 匹配平铺模板文件名 `SKU(宽×高cm)`（`_SIZE_IN_FILENAME_RE`，兼容旧写法 `SKU（宽-高）`、全/半角括号混用；文件名不带尺寸的模板（相框 `SKU.psd`，文件名像 SKU 才以文件名为 SKU，否则取目录名）在没有尺寸一致的模板时对应该 SKU 所有尺寸，方案文档 9.16）→ `local_candidates.py` 本地确定性匹配人物素材候选 → 仅歧义字段交给 `ai_client.py` → `ai_mapping.py` 校验 AI 输出 → 用户审核后存入 `template_profiles.py` → `order_pipeline.compile_plan()` 编译渲染参数 → `renderer.render()`。
 
 ### 关键边界与不变量
 

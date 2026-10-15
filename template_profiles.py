@@ -193,8 +193,9 @@ def put_profile(store: dict, profile: dict) -> str:
     sku = str(profile.get("sku") or "").strip()
     size_key = str(profile.get("size_key") or "").strip()
     filename = str(profile.get("template_filename") or "").strip()
-    if not sku or not size_key or not filename:
-        raise ValueError("模板档案缺少 SKU、尺寸或文件名")
+    # 尺寸可以为空: 相框等文件名不带尺寸的模板（2026-10-15）
+    if not sku or not filename:
+        raise ValueError("模板档案缺少 SKU 或文件名")
     normalized = copy.deepcopy(profile)
     normalized["schema_version"] = SCHEMA_VERSION
     normalized["sku"] = sku

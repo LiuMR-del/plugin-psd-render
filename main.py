@@ -2555,7 +2555,9 @@ def main(page: ft.Page):
             filename = os.path.basename(source)
             sku, size_key, _, _ = templates.parse_template_filename(filename)
             key = f"{sku} / {size_key}"
-            if key not in missing_keys:
+            # 文件名不带尺寸的模板（相框）对应这个 SKU 的所有尺寸
+            fits = key in missing_keys if size_key else any(k.startswith(f"{sku} / ") for k in missing_keys)
+            if not fits:
                 errors.append(f"模板 {filename} 未对应当前缺口: {key}")
                 continue
             target_dir = os.path.join(template_dir, "导入模板")
@@ -4417,7 +4419,7 @@ def main(page: ft.Page):
             )
             if not candidates:
                 return [], [
-                    f"SKU {row.sku} 没有严格匹配尺寸 {normalized.size_key} 的模板"
+                    f"SKU {row.sku} 没有尺寸 {normalized.size_key} 的模板，也没有不带尺寸的模板"
                 ]
             if len(candidates) > 1:
                 return [], [

@@ -20,6 +20,9 @@ PSD 图层解析用 psd-tools 只读打开(不 composite), 收集完整图层清
 模板总库(2026-10-15): 可以选一个外层文件夹, 各品类模板放在下面的子文件夹里
 (铝板画/、毛毯/)。模板的品类 = 模板库下第一层文件夹名。子文件夹以前单独当过模板库时
 留下的缓存/缩略图, 扫描外层时按路径前缀接收, 不用重新解析。
+
+文件名不带尺寸的模板(相框, 2026-10-15): 文件名像 SKU 时以文件名为 SKU, 对应这个 SKU
+的所有尺寸(pick_by_size 在没有尺寸一致的模板时使用)。
 """
 
 from __future__ import annotations
@@ -46,6 +49,7 @@ _SIZE_IN_FILENAME_RE = re.compile(
     r"(?P<right>\d+(?:[.,]\d+)?)\s*(?:cm)?\s*[）)]",
     re.IGNORECASE,
 )
+_SKU_LIKE_RE = re.compile(r"^(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9][A-Za-z0-9_-]*$")
 _VARIANT_RE = re.compile(r"^(?P<name>.+?)-\[(?P<value>[^]]+)\]$")
 
 
@@ -78,7 +82,10 @@ def parse_template_filename(filename: str, fallback_sku: str = "") -> tuple[str,
         variant_value = variant_match.group("value").strip()
     size_match = _SIZE_IN_FILENAME_RE.search(stem)
     if not size_match:
-        return (str(fallback_sku or stem).strip(), "", stem, variant_value)
+        # 相框等不带尺寸的模板以文件名为 SKU（放在品类文件夹里）；
+        # 普通模板流程的 {SKU}/贺卡.psd 文件名不像 SKU，仍取目录名。
+        sku = stem if _SKU_LIKE_RE.match(stem.strip()) or not fallback_sku else fallback_sku
+        return (str(sku).strip(), "", stem, variant_value)
     sku = stem[:size_match.start()].strip().rstrip("-_ ") or str(fallback_sku or "").strip()
     size_key = order_intake.dimension_key_from_cm(
         size_match.group("left"), size_match.group("right"),
@@ -526,10 +533,14 @@ def pick_by_size(index: dict[str, list[Template]], sku: str, size_key: str | Ite
 
     ``size_key`` may be a list (``NormalizedOrder.size_keys``): keys are tried
     in order and the first one with a matching template wins.
+
+    A template whose filename has no size (photo frames, 2026-10-15) serves
+    every size of its SKU; it is used only when no sized template matches.
     """
     keys = [size_key] if isinstance(size_key, str) else list(size_key or [])
+    keys = [str(key or "") for key in keys if key] + [""]
     for key in keys:
-        candidates = [item for item in index.get(sku, []) if item.size_key == str(key or "")]
+        candidates = [item for item in index.get(sku, []) if item.size_key == key]
         if field_value:
             exact = [item for item in candidates if item.field_value == field_value]
             if exact:
