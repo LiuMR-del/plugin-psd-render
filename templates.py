@@ -16,6 +16,10 @@ PSD 图层解析用 psd-tools 只读打开(不 composite), 收集完整图层清
 同时为每个模版生成缩略图。解析结果与缩略图都缓存在模版目录下
 (.psd-render-cache.json / .psd-render-thumbs/), 逐文件比对 mtime+size,
 命中则跳过解析。缓存随模版目录走, 换机器 / 多人共享目录也能复用。
+
+模板总库(2026-10-15): 可以选一个外层文件夹, 各品类模板放在下面的子文件夹里
+(铝板画/、毛毯/)。模板的品类 = 模板库下第一层文件夹名。子文件夹以前单独当过模板库时
+留下的缓存/缩略图, 扫描外层时按路径前缀接收, 不用重新解析。
 """
 
 from __future__ import annotations
@@ -24,6 +28,7 @@ import hashlib
 import json
 import os
 import re
+import shutil
 from dataclasses import dataclass, field
 from typing import Iterable
 
@@ -60,6 +65,7 @@ class Template:
     size_key: str = ""  # 文件名/档案解析出的严格方向尺寸, 例如 30x20
     description: str = ""  # 尺寸括号后的附加说明
     structure_signature: str = ""  # 稳定图层结构签名
+    category: str = ""  # 模板库下第一层文件夹名(品类), 放在库根目录的为 ""
 
 
 def parse_template_filename(filename: str, fallback_sku: str = "") -> tuple[str, str, str, str]:
@@ -291,6 +297,15 @@ def structure_signature(width: int, height: int, all_layers: list[dict]) -> str:
     return "sha256:" + hashlib.sha256(encoded.encode("utf-8")).hexdigest()
 
 
+def _copy_thumbnail(source: str, thumb_path: str) -> bool:
+    try:
+        os.makedirs(os.path.dirname(thumb_path), exist_ok=True)
+        shutil.copyfile(source, thumb_path)
+        return True
+    except OSError:
+        return False
+
+
 def _make_thumbnail(psd_path: str, thumb_path: str) -> bool:
     """生成模版缩略图。优先用文件内嵌合成图(最大兼容性保存时存在), 避免逐层合成。"""
     try:
@@ -341,6 +356,23 @@ def _save_cache(template_dir: str, entries: dict) -> None:
         pass  # 只读目录等场景下缓存写失败不影响功能
 
 
+def _nested_cache(template_dir: str, cache_dirs: list[str]) -> dict:
+    """Cache entries of sub-folders once used as libraries on their own, keyed
+    relative to ``template_dir``; each carries ``_thumb_src`` (its old thumbnail)."""
+    merged: dict = {}
+    for directory in cache_dirs:
+        prefix = os.path.relpath(directory, template_dir).replace(os.sep, "/")
+        for key, info in _load_cache(directory).items():
+            if not isinstance(info, dict):
+                continue
+            entry = dict(info)
+            entry["_thumb_src"] = (
+                os.path.join(directory, THUMB_DIRNAME, info["thumb"]) if info.get("thumb") else ""
+            )
+            merged.setdefault(f"{prefix}/{key}", entry)
+    return merged
+
+
 def _prune_thumbnails(thumb_dir: str, keep: set[str]) -> None:
     """Drop thumbnails of templates that are gone or renamed (like stale cache entries)."""
     try:
@@ -368,6 +400,7 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
 
     candidates: list[tuple[str, str, str]] = []
     walk_errors: list[tuple[str, str]] = []
+    nested_cache_dirs: list[str] = []
 
     def on_walk_error(exc: OSError) -> None:
         walk_errors.append((os.path.relpath(str(exc.filename or template_dir), template_dir), f"无法读取目录: {exc}"))
@@ -382,6 +415,8 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
             )
             relative_dir = os.path.relpath(current, template_dir)
             fallback_sku = "" if relative_dir == "." else os.path.basename(current)
+            if relative_dir != "." and CACHE_FILENAME in files:
+                nested_cache_dirs.append(current)
             for fname in sorted(files):
                 if fname.startswith(".") or not fname.lower().endswith(_TEMPLATE_EXTENSIONS):
                     continue
@@ -389,8 +424,9 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
                 candidates.append((fallback_sku, fname, path))
     except OSError as exc:
         return {}, {"sku_count": 0, "template_count": 0, "variant_count": 0,
-                    "cache_hits": 0, "flat_count": 0, "errors": [(".", str(exc))]}
+                    "cache_hits": 0, "flat_count": 0, "categories": {}, "errors": [(".", str(exc))]}
 
+    nested_cache = {} if force else _nested_cache(template_dir, nested_cache_dirs)
     for fallback_sku, fname, path in candidates:
         relative_path = os.path.relpath(path, template_dir).replace(os.sep, "/")
         if "/" not in relative_path:
@@ -405,12 +441,17 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
         key = relative_path
         stat = os.stat(path)
         cached = old_cache.get(key)
+        if not (cached and cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size):
+            cached = nested_cache.get(key)
         thumb_path = os.path.join(thumb_dir, _thumb_name(sku, relative_path))
         if cached and cached.get("mtime") == stat.st_mtime and cached.get("size") == stat.st_size:
             info = dict(cached)
+            thumb_src = info.pop("_thumb_src", "")
             cache_hits += 1
             if info.get("thumb") and not os.path.exists(thumb_path):
-                if _make_thumbnail(path, thumb_path):
+                if thumb_src and _copy_thumbnail(thumb_src, thumb_path):
+                    info["thumb"] = _thumb_name(sku, relative_path)
+                elif _make_thumbnail(path, thumb_path):
                     info["thumb"] = _thumb_name(sku, relative_path)
                 else:
                     info["thumb"] = ""
@@ -451,6 +492,7 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
             size_key=size_key,
             description=description if size_key else "",
             structure_signature=str(info.get("structure_signature") or ""),
+            category=relative_path.split("/", 1)[0] if "/" in relative_path else "",
         )
         index.setdefault(sku, []).append(template)
 
@@ -462,12 +504,16 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
         _prune_thumbnails(thumb_dir, {os.path.basename(t.thumb) for v in index.values() for t in v if t.thumb})
     template_count = sum(len(v) for v in index.values())
     variant_count = sum(1 for v in index.values() for t in v if t.field_value)
+    categories: dict[str, int] = {}
+    for item in sorted((t for v in index.values() for t in v), key=lambda t: t.category):
+        categories[item.category] = categories.get(item.category, 0) + 1
     stats = {
         "sku_count": len(index),
         "template_count": template_count,
         "variant_count": variant_count,
         "cache_hits": cache_hits,
         "flat_count": flat_count,
+        "categories": categories,  # 品类 -> 模板数, 库根目录下的模板记在 ""
         "errors": walk_errors + errors,
         "complete": not walk_errors,  # 每个子目录都读到了
     }

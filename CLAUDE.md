@@ -19,7 +19,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 .venv/bin/python main.py        # 直接启动 GUI
 
 # 测试（均无需 Photoshop / GUI）
-.venv/bin/python selftest.py                                   # 主自测，自定义 check() 断言计数（当前 194 项；unittest 106 项）
+.venv/bin/python selftest.py                                   # 主自测，自定义 check() 断言计数（当前 194 项；unittest 112 项）
 .venv/bin/python -m unittest discover -p 'test_*.py'           # unittest 专项测试
 .venv/bin/python -m unittest test_order_pipeline.OrderPipelineTests.<test_name>   # 单个测试
 
@@ -48,6 +48,7 @@ flet pack main.py --name PSD批量生图 --add-data "render.jsx;."   # Windows �
 - **两类持久化位置不同**：
   - 用户级 UI 配置：`~/.plugin-psd-render/config.json`（`settings.py`，按「模板目录 → SKU」两级记忆）；AI 熔断状态：`~/.plugin-psd-render/ai-runtime.json`（`ai_runtime.py`，只存 Key 指纹）。
   - 模板库级：`{模板目录}/.psd-render-profiles.json`（模板档案，只存「字段 → 完整图层路径」规则，不存订单具体值）；`{模板目录}/.psd-render-cache.json`（psd-tools 解析缓存，按 mtime+size 失效）。
+- **模板总库**（方案文档 9.15）：模板库可以是放多个品类子文件夹的外层文件夹，`Template.category` = 第一层文件夹名，`stats["categories"]` 为各品类数量。档案/缓存/缩略图只存在所选模板库；扫描时 `scan_templates` 复用子文件夹里的旧缓存与缩略图，`template_profiles.merge_nested_stores()` 把子文件夹旧档案中外层没有的拷入（`merged_sources` 记来源 mtime，防止外层删掉的又被导回）。
 - **档案复用以结构签名为准**：`templates.structure_signature()` 由画布尺寸 + 图层树计算（bbox、文字内容不参与，缓存 v8 才开始记录这两项）；档案 key 为 SKU + 尺寸 + 文件名（+绝对路径），模板库换路径/换机器时按 SKU + 尺寸 + 文件名唯一匹配兜底。签名变化 → 档案失效回到待审核。已审核且签名一致的模板不调用 AI。
 - **清理无效记录**（`library_cleanup.py`，方案文档 9.10）：按 `template_profiles.matched_profile_key`（与 `get_profile` 同一套匹配）找出无主档案，另列其他/已不存在模板库的 `config.json` 配置，用户确认后才删；从不删 PSD 或当前库配置。无主缩略图由 `scan_templates` 每次扫描自动删除（有子目录读不到、`stats["complete"]` 为 False 时不删，也不允许清理）。档案的 SKU + 尺寸 + 文件名兜底只匹配绑定 PSD 已不存在的档案。
 - **铝板画出图范围**：`render_rows()` 先按勾选范围取行（`state["selected_rows"]`，空 = 全部；预检同样只查这些行），`run_render` 再筛掉非“可生成”订单（不计入进度和失败，日志一行汇总），只渲染“可生成”订单；模板没有可编辑文字图层而订单有姓名/年份时订单标为异常并跳过（`text_rules.lacks_text_layers`）；待审核/缺模板/异常订单在预检中列为警告并记入失败报告，不阻止整批。铝板画模式下预检用 `compile_plan` 逐单预编译，跳过普通模板流程的列/别名/拆分检查。

@@ -25,17 +25,25 @@ def _empty_store() -> dict:
     return {"schema_version": SCHEMA_VERSION, "profiles": {}}
 
 
-def load_store(template_dir: str) -> dict:
-    path = profile_path(template_dir)
+def _read_store_file(path: str) -> dict | None:
     try:
         with open(path, encoding="utf-8") as handle:
             data = json.load(handle)
     except (OSError, ValueError, TypeError):
-        return _empty_store()
+        return None
     if not isinstance(data, dict) or not isinstance(data.get("profiles"), dict):
+        return None
+    return data
+
+
+def load_store(template_dir: str) -> dict:
+    data = _read_store_file(profile_path(template_dir))
+    if data is None:
         return _empty_store()
     result = _empty_store()
     result["profiles"] = data["profiles"]
+    if isinstance(data.get("merged_sources"), dict):
+        result["merged_sources"] = data["merged_sources"]
     return result
 
 
@@ -46,12 +54,56 @@ def save_store(template_dir: str, store: dict) -> str:
         "schema_version": SCHEMA_VERSION,
         "profiles": store.get("profiles") if isinstance(store, dict) else {},
     }
+    if isinstance(store, dict) and store.get("merged_sources"):
+        payload["merged_sources"] = store["merged_sources"]
     temporary = path + ".tmp"
     with open(temporary, "w", encoding="utf-8") as handle:
         json.dump(payload, handle, ensure_ascii=False, indent=2, sort_keys=True)
         handle.write("\n")
     os.replace(temporary, path)
     return path
+
+
+def merge_nested_stores(template_dir: str) -> int:
+    """Import profiles of sub-folders once used as libraries on their own.
+
+    A template master library holds one folder per category; profiles saved
+    while a category folder was the library live in that folder. Profiles the
+    library store lacks are copied in (the library's own entry wins); the
+    source files are left untouched. ``merged_sources`` records each source's
+    mtime so a profile deleted here is not imported again unless that source
+    changes. Returns how many profiles were imported.
+    """
+    root = os.path.abspath(template_dir)
+    store = load_store(root)
+    sources = dict(store.get("merged_sources") or {})
+    imported = 0
+    changed = False
+    for current, dirs, files in os.walk(root):
+        dirs[:] = sorted(d for d in dirs if not d.startswith("."))
+        if current == root or PROFILE_FILENAME not in files:
+            continue
+        path = os.path.join(current, PROFILE_FILENAME)
+        relative = os.path.relpath(path, root).replace(os.sep, "/")
+        try:
+            mtime = os.stat(path).st_mtime
+        except OSError:
+            continue
+        if sources.get(relative) == mtime:
+            continue
+        data = _read_store_file(path)
+        if data is None:
+            continue
+        for key, profile in data["profiles"].items():
+            if isinstance(profile, dict) and key not in store["profiles"]:
+                store["profiles"][key] = copy.deepcopy(profile)
+                imported += 1
+        sources[relative] = mtime
+        changed = True
+    if changed:
+        store["merged_sources"] = sources
+        save_store(root, store)
+    return imported
 
 
 def profile_key(sku: str, size_key: str, filename: str, template_path: str = "") -> str:

@@ -713,7 +713,7 @@ def main(page: ft.Page):
                 continue
             if len(matches) > 1:
                 order.status = "needs_review"
-                order.status_reason = "同一 SKU+尺寸命中多个模板，需要人工确认"
+                order.status_reason = "同一 SKU+尺寸命中多个模板，需要人工确认：" + template_places(matches)
                 needs_review[(order.sku, order.size_key, "multiple")] = (
                     needs_review.get((order.sku, order.size_key, "multiple"), []) + [order.row_no]
                 )
@@ -935,6 +935,13 @@ def main(page: ft.Page):
                 return []
             return templates.pick_by_size(state["index"], row.sku, normalized.size_keys, field_value)
         return templates.pick(state["index"], row.sku, field_value)
+
+    def template_places(items: list[templates.Template]) -> str:
+        """Where duplicate templates sit, relative to the library (e.g. 铝板画/x.psd、毛毯/x.psd)."""
+        root = template_dir_field.value
+        return "、".join(
+            os.path.relpath(t.path, root).replace(os.sep, "/") if root else t.filename for t in items
+        )
 
     def aliases_for(sku: str) -> dict:
         return settings.get_layer_aliases(cfg, template_dir_field.value, sku)
@@ -2303,7 +2310,16 @@ def main(page: ft.Page):
 
     def build_sku_list():
         sku_list_view.controls.clear()
-        for sku in sorted(state["index"]):
+        def category_of(sku: str) -> str:
+            return "、".join(sorted({t.category for t in state["index"][sku]}))
+        skus = sorted(state["index"], key=lambda sku: (category_of(sku), sku))
+        grouped = any(category_of(sku) for sku in skus)
+        current = None
+        for sku in skus:
+            if grouped and category_of(sku) != current:
+                current = category_of(sku)
+                sku_list_view.controls.append(ft.Text(
+                    current or "根目录", size=15, weight=ft.FontWeight.BOLD))
             sku_list_view.controls.append(build_sku_card(sku))
         for key, err in (state["stats"] or {}).get("errors", []):
             sku_list_view.controls.append(
@@ -2335,6 +2351,8 @@ def main(page: ft.Page):
             try:
                 with scan_lock:
                     index, stats = templates.scan_templates(d, force=force)
+                    # 品类子文件夹以前单独当模板库时审核过的档案, 合并到总库
+                    imported = template_profiles.merge_nested_stores(d)
             except Exception as e:  # noqa: BLE001
                 template_status.value = f"扫描失败: {e}"
                 page.update()
@@ -2348,9 +2366,16 @@ def main(page: ft.Page):
                 f"已加载: {stats['sku_count']} 个 SKU / {stats['template_count']} 个模版"
                 f"（{stats['variant_count']} 个含变体）· 缓存命中 {stats['cache_hits']}/{stats['template_count']}"
             )
-            template_library_path_status.value = f"模板库：{d} · {template_status.value}"
+            category_counts = stats.get("categories") or {}
+            if any(category_counts):
+                template_status.value += " · " + "、".join(
+                    f"{category or '根目录'} {count}" for category, count in category_counts.items()
+                )
+            if imported:
+                template_status.value += f" · 已合并子文件夹的审核档案 {imported} 条"
             if stats["errors"]:
                 template_status.value += f" · {len(stats['errors'])} 个解析失败"
+            template_library_path_status.value = f"模板库：{d} · {template_status.value}"
             build_sku_list()
             refresh_order_summary(update=False)
             refresh_excel_action_state()
@@ -3310,7 +3335,8 @@ def main(page: ft.Page):
                               on_click=lambda e: show_cleanup_dialog()),
             ], tight=True),
         ], alignment=ft.MainAxisAlignment.SPACE_BETWEEN),
-        ft.Text("支持模板库中任意层级的 PSD/PSB；SKU 和尺寸优先从文件名识别。", size=12,
+        ft.Text("可以选一个总文件夹，各品类模板放在下面的子文件夹里（如 铝板画、毛毯），一次全部读到；"
+                "SKU 和尺寸从文件名识别。", size=12,
                 color=ft.Colors.ON_SURFACE_VARIANT),
         template_library_path_status,
         ft.Container(content=sku_list_view, expand=True, padding=8,
@@ -4395,7 +4421,8 @@ def main(page: ft.Page):
                 ]
             if len(candidates) > 1:
                 return [], [
-                    f"SKU {row.sku} / {normalized.size_key} 命中多个模板，需要人工确认"
+                    f"SKU {row.sku} / {normalized.size_key} 命中多个模板，需要人工确认："
+                    + template_places(candidates)
                 ]
             return candidates, []
         candidates = state["index"].get(row.sku) or []
