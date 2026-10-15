@@ -5,6 +5,8 @@
 //       visibilityActions, pathReplacements, smartObjectTextReplacements, imageReplacements }
 //       pathReplacements 条目可选 fitBox (2026-10-13 新增, 可选键, 不带时行为不变);
 //       fitBox 内可选 syncGroup (2026-10-14 新增): 同一文档里同组文字按组内最小比例一起缩放
+//       pathReplacements 条目可选 color("#RRGGBB")、font(字体家族名) (2026-10-15 新增, 不带时行为不变):
+//       写入文字后、按范围框缩放前改文字颜色/字体; 本机没有该字体时这一单报错, 不静默替换
 //   __RESULT_JSON_PATH__  结果 JSON: { ok, replaced, smartObjectReplaced, imageReplaced } 或错误
 //   另在 RESULT_PATH + ".progress" 逐行追加 "毫秒\t步骤"(2026-10-14), Python 看门狗据此判断卡在哪一步
 //
@@ -377,7 +379,7 @@ function applyTextBoxPlans(plans) {
 }
 
 // 有 fitBox 时只写入文字并返回适配计划(由调用方 applyTextBoxPlans 缩放), 否则返回 null
-function replaceLayerText(layer, value, replaced, fontWarnings, pathLabel, requestedFont, fitBox) {
+function replaceLayerText(layer, value, replaced, fontWarnings, pathLabel, requestedFont, fitBox, style) {
     var originalRulerUnits = app.preferences.rulerUnits;
     app.preferences.rulerUnits = Units.PIXELS;
     var plan = null;
@@ -391,6 +393,7 @@ function replaceLayerText(layer, value, replaced, fontWarnings, pathLabel, reque
         }
         var original = fitBox ? null : textBoundsPx(layer);
         replaceLayerTextContents(layer, value, fontWarnings, pathLabel, requestedFont);
+        applyTextStyle(layer, style, pathLabel);
         if (fitBox) plan = planTextBox(layer, fitBox, pathLabel);
         else fitTextToCanvas(layer, original, pathLabel);
     } finally {
@@ -398,6 +401,66 @@ function replaceLayerText(layer, value, replaced, fontWarnings, pathLabel, reque
     }
     replaced.push(pathLabel);
     return plan;
+}
+
+// 已安装字体索引(只在订单要求换字体时读一次): PostScript 名 / 家族 / 全名 -> 字体
+var installedFonts = null;
+
+function fontKey(name) {
+    return String(name || "").toLowerCase().replace(/[^a-z0-9]/g, "");
+}
+
+function fontIndex() {
+    if (installedFonts) return installedFonts;
+    progress("读取已安装字体");
+    installedFonts = { byPs: {}, byFamily: {}, byName: {} };
+    for (var i = 0; i < app.fonts.length; i++) {
+        var f = app.fonts[i];
+        var info = { ps: String(f.postScriptName), family: fontKey(f.family), style: fontKey(f.style) };
+        installedFonts.byPs[fontKey(info.ps)] = info;
+        installedFonts.byName[fontKey(f.name)] = info;
+        if (!installedFonts.byFamily[info.family]) installedFonts.byFamily[info.family] = [];
+        installedFonts.byFamily[info.family].push(info);
+    }
+    return installedFonts;
+}
+
+// 订单字体: 与当前字体同家族时不换; 否则在该家族里取与当前字重相同的(Bold 仍为 Bold), 没有则 Regular
+function resolveFont(layer, wanted) {
+    var index = fontIndex();
+    var key = fontKey(wanted);
+    var choices = index.byFamily[key];
+    if (!choices) {
+        // 不是家族名时按 PostScript 名或全名(如 Arial Bold)精确匹配
+        var exact = index.byPs[key] || index.byName[key];
+        return exact ? exact.ps : "";
+    }
+    var current = index.byPs[fontKey(safeTextFont(layer))];
+    if (current && current.family === key) return current.ps;
+    var preferred = [current ? current.style : "", "regular", "normal", "roman", "book"];
+    for (var p = 0; p < preferred.length; p++) {
+        for (var c = 0; c < choices.length; c++) {
+            if (preferred[p] && choices[c].style === preferred[p]) return choices[c].ps;
+        }
+    }
+    return choices[0].ps;
+}
+
+function applyTextStyle(layer, style, pathLabel) {
+    if (!style) return;
+    if (style.font) {
+        var ps = resolveFont(layer, style.font);
+        if (!ps) throw new Error("本机没有安装订单要求的字体「" + style.font + "」: " + pathLabel);
+        if (safeTextFont(layer) !== ps) {
+            layer.textItem.font = ps;
+            if (safeTextFont(layer) !== ps) throw new Error("无法应用订单要求的字体「" + style.font + "」: " + pathLabel);
+        }
+    }
+    if (style.color) {
+        var color = new SolidColor();
+        color.rgb.hexValue = String(style.color).replace("#", "");
+        layer.textItem.color = color;
+    }
 }
 
 function replaceLayerTextContents(layer, value, fontWarnings, pathLabel, requestedFont) {
@@ -528,7 +591,8 @@ function replaceTextLayersByPath(doc, items, replaced, fontWarnings, pathPrefix,
         if (layer.typename === "LayerSet" || layer.kind !== LayerKind.TEXT) {
             throw new Error("目标不是文字图层: " + pathLabel);
         }
-        var plan = replaceLayerText(layer, item.value, replaced, fontWarnings, pathLabel, requestedFont, item.fitBox || null);
+        var plan = replaceLayerText(layer, item.value, replaced, fontWarnings, pathLabel, requestedFont, item.fitBox || null,
+                                    (item.color || item.font) ? { color: item.color, font: item.font } : null);
         if (plan) plans.push(plan);
     }
     // 先写完本文档所有文字再缩放: 同组姓名要按组内最小比例一起缩

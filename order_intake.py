@@ -12,11 +12,15 @@ from decimal import Decimal, InvalidOperation, ROUND_HALF_UP
 from typing import Iterable
 
 
+# 第一个数字后可带单位或英寸引号: 50"x60"、20“x30“、20cm x 30cm
+_UNIT_MARK = r"cm|厘米|inch(?:es)?|in|英寸|[\"“”″]"
 _SIZE_PAIR_RE = re.compile(
-    r"(?P<left>\d+(?:[.,]\d+)?)\s*(?:×|x|X|\*|\s+-\s*|[-—–－])\s*"
-    r"(?P<right>\d+(?:[.,]\d+)?)"
+    r"(?P<left>\d+(?:[.,]\d+)?)\s*(?:" + _UNIT_MARK + r")?\s*(?:×|x|X|\*|\s+-\s*|[-—–－])\s*"
+    r"(?P<right>\d+(?:[.,]\d+)?)",
+    re.I,
 )
-_UNIT_RE = re.compile(r"(?P<unit>cm|厘米|inch(?:es)?|inches|inch|in|英寸|\")", re.I)
+_UNIT_RE = re.compile(r"(?P<unit>cm|厘米|inch(?:es)?|inches|inch|in|英寸|[\"“”″])", re.I)
+_QUOTE_UNITS = {"“", "”", "″"}
 _SIZE_COLUMN_ALIASES = {
     "尺寸", "规格", "size", "dimension", "dimensions", "product size",
     "select size", "选择尺寸",
@@ -31,6 +35,8 @@ class SizeSpec:
     height_mm: int
     source: str = ""
     unit: str = ""
+    # 尺寸列里写的数字原样组成的 key（不换算单位），例如 50"x60" -> 50x60
+    written_key: str = ""
 
     @property
     def key(self) -> str:
@@ -52,8 +58,16 @@ class NormalizedOrder:
     status_reason: str = ""
 
     @property
+    def size_keys(self) -> list[str]:
+        """匹配模板时依次尝试的尺寸: 先按写的数字, 再按换算成厘米后的尺寸。"""
+        if not self.size:
+            return []
+        return list(dict.fromkeys(key for key in (self.size.written_key, self.size.key) if key))
+
+    @property
     def size_key(self) -> str:
-        return self.size.key if self.size else ""
+        keys = self.size_keys
+        return keys[0] if keys else ""
 
 
 def _decimal(value: str) -> Decimal:
@@ -112,7 +126,8 @@ def _unit_before_or_after(text: str, pair_end: int) -> str:
     tail = str(text or "")[pair_end:pair_end + 16]
     match = _UNIT_RE.search(tail)
     if match:
-        return match.group("unit").casefold()
+        unit = match.group("unit").casefold()
+        return '"' if unit in _QUOTE_UNITS else unit
     return ""
 
 
@@ -129,8 +144,20 @@ def _extract_explicit_unit_pair(text: str, unit: str) -> tuple[Decimal, Decimal]
     return None
 
 
+def _size_spec(pair: tuple[Decimal, Decimal], unit: str, raw: str) -> SizeSpec:
+    written_key = dimension_key_from_cm(pair[0], pair[1])
+    if unit == "inch":
+        return SizeSpec(_inch_to_mm(pair[0]), _inch_to_mm(pair[1]), raw, unit, written_key)
+    return SizeSpec(_cm_to_mm(pair[0]), _cm_to_mm(pair[1]), raw, unit, written_key)
+
+
 def parse_size(text: str) -> SizeSpec | None:
-    """Parse a size string, preferring an explicit cm pair over inch pair."""
+    """Parse a size string, preferring an explicit cm pair over inch pair.
+
+    The numbers as written are kept in ``written_key`` (no unit conversion);
+    templates are matched on them first, so ``50"x60"`` matches ``(50×60)``.
+    A pair without any unit (``20-30``) is accepted with ``unit == ""``.
+    """
 
     raw = str(text or "").strip()
     if not raw:
@@ -139,26 +166,24 @@ def parse_size(text: str) -> SizeSpec | None:
     # Prefer the explicit cm value, including forms such as (30x20cm).
     cm_pair = _extract_explicit_unit_pair(raw, "cm")
     if cm_pair:
-        return SizeSpec(_cm_to_mm(cm_pair[0]), _cm_to_mm(cm_pair[1]), raw, "cm")
+        return _size_spec(cm_pair, "cm", raw)
 
     # Chinese unit names and a quoted inch suffix are normalized here.
-    for unit in ("厘米", "英寸", "inch", "inches", "inch", "in", '"'):
+    for unit in ("厘米", "英寸", "inch", "inches", "in", '"'):
         pair = _extract_explicit_unit_pair(raw, unit.casefold())
         if pair:
-            if unit in {"厘米"}:
-                return SizeSpec(_cm_to_mm(pair[0]), _cm_to_mm(pair[1]), raw, "cm")
-            return SizeSpec(_inch_to_mm(pair[0]), _inch_to_mm(pair[1]), raw, "inch")
+            return _size_spec(pair, "cm" if unit == "厘米" else "inch", raw)
 
     # If the unit is attached before the pair (e.g. "inch 12x8"), infer it.
     pair = _find_pair(raw)
     if not pair:
         return None
     lower = raw.casefold()
-    if any(token in lower for token in ("inch", " in", "英寸", '"')):
-        return SizeSpec(_inch_to_mm(pair[0]), _inch_to_mm(pair[1]), raw, "inch")
+    if any(token in lower for token in ("inch", " in", "英寸", '"', "“", "”", "″")):
+        return _size_spec(pair, "inch", raw)
     if "cm" in lower or "厘米" in raw:
-        return SizeSpec(_cm_to_mm(pair[0]), _cm_to_mm(pair[1]), raw, "cm")
-    return None
+        return _size_spec(pair, "cm", raw)
+    return _size_spec(pair, "", raw)
 
 
 def normalize_header(value: str) -> str:

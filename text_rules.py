@@ -18,6 +18,19 @@ layer, a woman's name into a stray layer).  Rules:
 ``resolve_order_text`` applies reviewed or local mappings to one order and
 checks the result: every name/year field must land on its own visible text
 layer of the matching role, otherwise the order is blocked.
+
+Other text fields (``Initial``, ``Sign``, ``Sunrise``...) are written only when
+the template profile maps them (AI analysis or review); their kind is
+``text`` and any visible text layer is allowed.
+
+Text style fields (2026-10-15): ``Text Color`` / ``Font Color`` / ``Name
+Color`` set the text colour, ``Font`` the font family.  The value is used
+directly (a ``#RRGGBB`` in it, or the font name); a colour name without a hex
+value needs the profile's ``color_values`` (filled by AI analysis or review).
+The style applies to the name layers written for the order (all written
+layers when there is no name), unless the profile's ``style_mappings`` names
+the target layers.  An ambiguous label such as ``Color`` is a style field
+only when the profile says so.
 """
 from __future__ import annotations
 
@@ -40,7 +53,18 @@ YEAR = "year"
 NAME_MAN = "name_man"
 NAME_WOMAN = "name_woman"
 NAME = "name"
-KIND_LABELS = {YEAR: "年份", NAME_MAN: "男方姓名", NAME_WOMAN: "女方姓名", NAME: "姓名"}
+TEXT = "text"
+KIND_LABELS = {YEAR: "年份", NAME_MAN: "男方姓名", NAME_WOMAN: "女方姓名", NAME: "姓名", TEXT: "文字"}
+NAME_KINDS = (NAME, NAME_MAN, NAME_WOMAN)
+
+STYLE_COLOR = "color"
+STYLE_FONT = "font"
+STYLE_LABELS = {STYLE_COLOR: "文字颜色", STYLE_FONT: "字体"}
+_COLOR_WORDS = {"color", "colour"}
+_STYLE_TARGET_WORDS = {"font", "text", "name", "names", "letter", "letters", "lettering", "title"}
+_HEX_RE = re.compile(r"#([0-9a-f]{6}|[0-9a-f]{3})(?![0-9a-z])", re.IGNORECASE)
+# Labels that never carry text to write, even when an AI maps them as text.
+NOT_TEXT_CONTENT_WORDS = {"font", "color", "colour", "size", "confirm", "photo", "upload", "image", "picture"}
 
 
 def _tokens(value: Any) -> set[str]:
@@ -78,6 +102,34 @@ def classify_field(label: str) -> str:
             return NAME_MAN
         return NAME
     return ""
+
+
+def style_kind(label: str) -> str:
+    """``color`` for Text/Font/Name Color, ``font`` for Font; "" otherwise (e.g. plain ``Color``)."""
+    tokens = _tokens(label)
+    if tokens & _COLOR_WORDS:
+        return STYLE_COLOR if tokens & _STYLE_TARGET_WORDS else ""
+    if tokens & {"font", "fonts"} and "size" not in tokens:
+        return STYLE_FONT
+    return ""
+
+
+def color_hex(value: Any) -> str:
+    """``#RRGGBB`` written in an order value (``Red (#E30200)``), else ""."""
+    match = _HEX_RE.search(str(value or ""))
+    if not match:
+        return ""
+    digits = match.group(1).upper()
+    if len(digits) == 3:
+        digits = "".join(ch * 2 for ch in digits)
+    return "#" + digits
+
+
+def normalize_hex(value: Any) -> str:
+    """A bare or #-prefixed 3/6 digit hex colour -> ``#RRGGBB``; "" when invalid."""
+    text = str(value or "").strip()
+    return color_hex(text if text.startswith("#") else "#" + text) if re.fullmatch(
+        r"#?(?:[0-9a-fA-F]{6}|[0-9a-fA-F]{3})", text) else ""
 
 
 def layer_role(layer: Mapping[str, Any]) -> str:
@@ -228,8 +280,13 @@ def _mapping(field: Mapping[str, Any], layer: Mapping[str, Any]) -> dict:
     }
 
 
-def text_fields(fields: Iterable[Any]) -> list[dict]:
-    """Unique name/year fields from parsed fields or {section,label} dicts."""
+def text_fields(fields: Iterable[Any], extra_labels: Iterable[str] = ()) -> list[dict]:
+    """Unique name/year fields from parsed fields or {section,label} dicts.
+
+    Labels in ``extra_labels`` (normalized; fields the profile maps as text)
+    are included as kind ``text`` when they are not name/year fields.
+    """
+    extra = {_norm_label(label) for label in extra_labels}
     result: list[dict] = []
     seen: set[tuple[str, str]] = set()
     for item in fields:
@@ -240,6 +297,8 @@ def text_fields(fields: Iterable[Any]) -> list[dict]:
         else:
             section, label, value = str(item.section), str(item.label), str(item.value)
         kind = classify_field(label)
+        if not kind and _norm_label(label) in extra and not style_kind(label):
+            kind = TEXT
         identity = (section.strip(), _norm_label(label))
         if not kind or identity in seen:
             continue
@@ -331,7 +390,7 @@ def check_mapping_roles(mappings: Iterable[Mapping[str, Any]], template) -> list
             continue
         if kind == YEAR and layer["role"] != YEAR:
             errors.append(f"年份字段「{label}」不能写入姓名图层「{layer['name']}」")
-        elif kind in (NAME, NAME_MAN, NAME_WOMAN) and layer["role"] == YEAR:
+        elif kind in NAME_KINDS and layer["role"] == YEAR:
             errors.append(f"姓名字段「{label}」不能写入年份图层「{layer['name']}」")
         if key in used:
             errors.append(f"「{used[key]}」和「{label}」写入了同一个文字图层「{layer['name']}」")
@@ -355,10 +414,12 @@ def resolve_order_text(template, parsed_fields: Iterable[Any], profile: Mapping[
     current order.  Returns main/smart replacements, errors, warnings and the
     handled field labels (callers must keep these out of legacy text logic).
     """
-    fields = [item for item in text_fields(parsed_fields) if item["value"]]
+    parsed_fields = list(parsed_fields)
+    profile = profile or {}
+    mapped_labels = [str(item.get("source_key") or "") for item in profile.get("text_mappings") or []]
+    fields = [item for item in text_fields(parsed_fields, mapped_labels) if item["value"]]
     layers = text_layers(template)
     by_key = {(tuple(layer["smart_object_path"]), tuple(layer["target_path"])): layer for layer in layers}
-    profile = profile or {}
     reviewed = bool(profile.get("text_reviewed") or profile.get("text_mappings"))
     local, _ = local_mappings(template, fields)
     if reviewed:
@@ -373,6 +434,7 @@ def resolve_order_text(template, parsed_fields: Iterable[Any], profile: Mapping[
         "handled_keys": {field_key(item["section"], item["label"]) for item in fields},
         "used_layers": set(),
         "name_layers": set(),
+        "styles": {},
     }
     if fields and not layers:
         # 2026-10-13 user decision: such an image would carry the PSD's sample
@@ -406,7 +468,7 @@ def resolve_order_text(template, parsed_fields: Iterable[Any], profile: Mapping[
         if item["kind"] == YEAR and layer["role"] != YEAR:
             result["errors"].append(f"年份「{item['value']}」不能写入姓名图层「{layer['name']}」")
             continue
-        if item["kind"] != YEAR and layer["role"] == YEAR:
+        if item["kind"] in NAME_KINDS and layer["role"] == YEAR:
             result["errors"].append(f"姓名「{item['value']}」不能写入年份图层「{layer['name']}」")
             continue
         if key in result["used_layers"]:
@@ -416,7 +478,7 @@ def resolve_order_text(template, parsed_fields: Iterable[Any], profile: Mapping[
         value = item["value"]
         if item["kind"] == YEAR:
             value = year_text(layer["text"], value)
-        else:
+        elif item["kind"] in NAME_KINDS:
             result["name_layers"].add(key)
         replacement = {"path": list(key[1]), "value": value}
         if key[0]:
@@ -427,12 +489,77 @@ def resolve_order_text(template, parsed_fields: Iterable[Any], profile: Mapping[
         for key, layer in by_key.items():
             if key not in result["used_layers"]:
                 result["warnings"].append(f"文字图层「{layer['name']}」没有对应的订单字段，保持 PSD 原文")
+    _resolve_styles(parsed_fields, profile, result)
     return result
 
 
+def style_fields(parsed_fields: Iterable[Any], profile: Mapping[str, Any] | None = None) -> list[dict]:
+    """Unique text style fields of one order, with the profile's style mapping (if any)."""
+    mappings = [item for item in (profile or {}).get("style_mappings") or [] if isinstance(item, Mapping)]
+    result: list[dict] = []
+    seen: set[tuple[str, str]] = set()
+    for item in parsed_fields:
+        if isinstance(item, Mapping):
+            section, label, value = (str(item.get("section") or ""), str(item.get("label") or ""),
+                                     str(item.get("value") or ""))
+        else:
+            section, label, value = str(item.section), str(item.label), str(item.value)
+        identity = (section.strip(), _norm_label(label))
+        if identity in seen:
+            continue
+        field = {"section": section.strip(), "label": label.strip(), "value": value.strip()}
+        mapping = _find_mapping(mappings, field)
+        style = str((mapping or {}).get("style") or "") or style_kind(label)
+        if style not in STYLE_LABELS:
+            continue
+        seen.add(identity)
+        result.append({**field, "style": style, "mapping": mapping})
+    return result
+
+
+def style_value(field: Mapping[str, Any], profile: Mapping[str, Any] | None = None) -> str:
+    """Colour as ``#RRGGBB`` (from the value or the profile's ``color_values``) or font name; "" if unknown."""
+    value = str(field.get("value") or "").strip()
+    if field.get("style") == STYLE_FONT:
+        return value
+    known = {_norm_label(name): normalize_hex(hex_value)
+             for name, hex_value in ((profile or {}).get("color_values") or {}).items()}
+    return color_hex(value) or known.get(_norm_label(value), "")
+
+
+def _resolve_styles(parsed_fields: Iterable[Any], profile: Mapping[str, Any], result: dict) -> None:
+    ignored = list(profile.get("ignored_fields") or [])
+    for field in style_fields(parsed_fields, profile):
+        result["handled_labels"].add(field["label"])
+        result["handled_keys"].add(field_key(field["section"], field["label"]))
+        if not field["value"] or _is_ignored(ignored, field):
+            continue
+        name = STYLE_LABELS[field["style"]]
+        value = style_value(field, profile)
+        if not value:
+            result["errors"].append(
+                f"{name}字段「{field['label']}」({field['value']}) 没有色值，需要 AI 分析给出色值或在审核中填写"
+            )
+            continue
+        targets = [
+            (tuple(_path(target.get("smart_object_path"))), tuple(_path(target.get("target_path"))))
+            for target in (field["mapping"] or {}).get("targets") or [] if isinstance(target, Mapping)
+        ]
+        if targets:
+            targets = [key for key in targets if key in result["used_layers"]]
+        else:
+            targets = sorted(result["name_layers"]) or sorted(result["used_layers"])
+        if not targets:
+            result["warnings"].append(f"{name}「{field['value']}」没有本单要写入的文字，未应用")
+            continue
+        for key in targets:
+            result["styles"].setdefault(key, {})[field["style"]] = value
+
+
 __all__ = [
-    "KIND_LABELS", "NAME", "NAME_MAN", "NAME_WOMAN", "NO_TEXT_LAYERS", "YEAR",
-    "check_mapping_roles", "classify_field", "fit_box", "lacks_text_layers", "layer_label", "layer_role",
-    "local_mappings", "parse_layer_label", "resolve_order_text", "text_fields",
-    "text_layers", "year_text",
+    "KIND_LABELS", "NAME", "NAME_KINDS", "NAME_MAN", "NAME_WOMAN", "NO_TEXT_LAYERS", "NOT_TEXT_CONTENT_WORDS",
+    "STYLE_COLOR", "STYLE_FONT", "STYLE_LABELS", "TEXT", "YEAR",
+    "check_mapping_roles", "classify_field", "color_hex", "fit_box", "lacks_text_layers", "layer_label",
+    "layer_role", "local_mappings", "normalize_hex", "parse_layer_label", "resolve_order_text", "style_fields",
+    "style_kind", "style_value", "text_fields", "text_layers", "year_text",
 ]

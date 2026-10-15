@@ -1089,6 +1089,20 @@ def _attach_fit_boxes(template, smart_path: list[str], replacements: list[dict],
                 item["fitBox"]["syncGroup"] = "name"
 
 
+def _attach_text_styles(smart_path: list[str], replacements: list[dict],
+                        styles: Mapping[tuple, Mapping[str, str]]) -> None:
+    """Add the order's text colour (``color``, ``#RRGGBB``) / font family (``font``).
+
+    Optional ``pathReplacements`` keys (2026-10-15 user request); the renderer
+    applies them after writing the text and before fitting it to its box.
+    """
+    for item in replacements:
+        style = styles.get((tuple(smart_path), _path_key(item.get("path")))) or {}
+        for key in (text_rules.STYLE_COLOR, text_rules.STYLE_FONT):
+            if style.get(key):
+                item[key] = style[key]
+
+
 def compile_plan(template, row: excel_data.ExcelRow, cfg: Mapping[str, Any], template_dir: str, *, strict: bool = True) -> dict:
     """Compile one deterministic renderer plan from a template and order row.
 
@@ -1146,7 +1160,8 @@ def compile_plan(template, row: excel_data.ExcelRow, cfg: Mapping[str, Any], tem
     warnings.extend(text_plan["warnings"])
     rule_columns = {" ".join(str(key).split()) for key in (*text_plan["handled_labels"], *text_plan["handled_keys"])}
     rule_layers = {(sp, tp) for sp, tp in text_plan["used_layers"]}
-    legacy_fields = [item for item in parsed if not text_rules.classify_field(item.label)]
+    legacy_fields = [item for item in parsed
+                     if not text_rules.classify_field(item.label) and item.label not in text_plan["handled_labels"]]
 
     def legacy_column(column: str) -> bool:
         return bool(column) and " ".join(column.split()) not in rule_columns
@@ -1295,8 +1310,10 @@ def compile_plan(template, row: excel_data.ExcelRow, cfg: Mapping[str, Any], tem
 
     smart_final = _merge_smart_tasks(smart_tasks, errors)
     _attach_fit_boxes(template, [], main_replacements, text_plan["name_layers"])
+    _attach_text_styles([], main_replacements, text_plan["styles"])
     for task in smart_final:
         _attach_fit_boxes(template, task["smartObjectPath"], task["pathReplacements"], text_plan["name_layers"])
+        _attach_text_styles(task["smartObjectPath"], task["pathReplacements"], text_plan["styles"])
     # Image references to a shared object must also agree.  This mirrors the
     # renderer's original consolidation rule without importing main.py.
     by_image_id: dict[str, str] = {}

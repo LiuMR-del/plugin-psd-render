@@ -25,6 +25,7 @@ import json
 import os
 import re
 from dataclasses import dataclass, field
+from typing import Iterable
 
 import order_intake
 
@@ -473,15 +474,24 @@ def scan_templates(template_dir: str, force: bool = False) -> tuple[dict[str, li
     return index, stats
 
 
-def pick_by_size(index: dict[str, list[Template]], sku: str, size_key: str,
+def pick_by_size(index: dict[str, list[Template]], sku: str, size_key: str | Iterable[str],
                  field_value: str = "") -> list[Template]:
-    """Strictly pick templates by SKU + orientation-preserving size."""
-    candidates = [item for item in index.get(sku, []) if item.size_key == str(size_key or "")]
-    if field_value:
-        exact = [item for item in candidates if item.field_value == field_value]
-        if exact:
-            return exact
-    return [item for item in candidates if item.field_value == ""]
+    """Strictly pick templates by SKU + orientation-preserving size.
+
+    ``size_key`` may be a list (``NormalizedOrder.size_keys``): keys are tried
+    in order and the first one with a matching template wins.
+    """
+    keys = [size_key] if isinstance(size_key, str) else list(size_key or [])
+    for key in keys:
+        candidates = [item for item in index.get(sku, []) if item.size_key == str(key or "")]
+        if field_value:
+            exact = [item for item in candidates if item.field_value == field_value]
+            if exact:
+                return exact
+        result = [item for item in candidates if item.field_value == ""]
+        if result:
+            return result
+    return []
 
 
 def pick(index: dict[str, list[Template]], sku: str, field_value: str = "") -> list[Template]:

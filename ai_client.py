@@ -566,13 +566,17 @@ def analyze_template(*, base_url: str, api_key: str, sku: str, size_key: str,
 def order_mapping_messages(*, sku: str, size_key: str, filename: str, request: dict) -> list[dict[str, str]]:
     """One isolated order: its full customization text + the template summary."""
     system = (
-        "你是铝板画模板映射助手。只返回 JSON 对象，不要 Markdown。"
+        "你是定制产品（铝板画、毛毯等）PSD 模板映射助手。只返回 JSON 对象，不要 Markdown。"
         "输入是一个订单的完整定制文案（customization_text）和这个 PSD 模板的图层摘要。"
         "只需要为 fields_to_map 里的字段给出规则；already_handled 里的字段程序已经处理好，不要重复。"
         "规则是“字段名 → 图层”，以后同模板的订单会复用规则、只替换数值，所以不要把具体数值写死进文字。"
-        "姓名、年份等需要写字的字段输出 text_mappings，只能选 text_layers 里的图层；"
+        "姓名、年份、标题、首字母、日期等值要写进图片的字段输出 text_mappings，只能选 text_layers 里的图层；"
         "年份只能对应 role=year 的图层，姓名只能对应 role=name 的图层，一个图层只能对应一个字段；"
         "可参考 bbox（[左,上,右,下]）判断左右，男方姓名通常在男性人物一侧。"
+        "设置文字颜色或字体的字段（kind 为 color/font，或你判断是改文字颜色的 Color 字段）输出 style_mappings，"
+        "style 为 color 或 font；targets 是要改样式的文字图层（取自 text_layers），留空表示所有姓名图层；"
+        "颜色值里没有 #RRGGBB 色值时（如 Light Pink），在 color_values 里按颜色名给出常用色值；"
+        "颜色、字体字段不能写进 text_mappings。"
         "人物素材或选项类字段（发型、饮品、标语样式等）需要切换图层显示时输出 person_style_mappings，"
         "parent_path 是互斥的父级组，value_mapping 把本订单的值映射到要显示的完整路径，只能取自 material_candidates 或 layer_outline；"
         "No、None、无等值给空列表并写入 hide_parent_values。"
@@ -590,6 +594,9 @@ def order_mapping_messages(*, sku: str, size_key: str, filename: str, request: d
                                        "parent_path": ["定制项"], "smart_object_path": [],
                                        "value_mapping": {"GRILL & CHILL": [["定制项", "GRILL & CHILL"]]},
                                        "hide_parent_values": [], "confidence": 0.0}],
+            "style_mappings": [{"section": "表面 1", "source_key": "Text Color", "style": "color",
+                                "targets": [{"smart_object_path": [], "target_path": ["组 1", "Title"]}]}],
+            "color_values": {"Light Pink": "#FFB6C1"},
             "ignored_fields": ["CONFIRM CUSTOM INFORMATION"],
             "unresolved_fields": [],
         },

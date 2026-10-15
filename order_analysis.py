@@ -80,17 +80,27 @@ def field_coverage(template, parsed: Iterable[Any], profile: Mapping[str, Any] |
         values = {_norm(value) for value in (mapping.get("value_mapping") or {})}
         values |= {_norm(value) for value in mapping.get("hide_parent_values") or []}
         selector_values.setdefault(label, set()).update(values)
+    styles = {(item["section"], _norm(item["label"])): item
+              for item in text_rules.style_fields(parsed, profile)}
     covered: list[dict] = []
     uncovered: list[dict] = []
     for field in _fields(parsed):
         label = _norm(field["label"])
         kind = text_rules.classify_field(field["label"])
+        style = styles.get((field["section"], label))
         material_state = material.get((field["section"], label))
         how = ""
         if label in ignored:
             how = "ignored"
         elif kind:
             how = "text" if label in text_labels else ""
+        elif style:
+            # Font names and #hex colours are used as written; a colour name
+            # needs its hex value from the profile (AI analysis / review).
+            how = "style" if text_rules.style_value(style, profile) else ""
+            kind = style["style"]
+        elif label in text_labels:
+            how, kind = "text", text_rules.TEXT
         elif material_state:
             how = "material"
         elif _norm(field["value"]) in selector_values.get(label, set()):
@@ -156,6 +166,7 @@ def local_suggestion(template, uncovered: list[dict]) -> dict:
         if item["kind"] == "other" and tokens & _IGNORABLE_WORDS and not tokens & _NEVER_IGNORE_WORDS:
             ignored.append(item["label"])
     return {"text_mappings": mappings, "person_style_mappings": [], "selector_mappings": [],
+            "style_mappings": [], "color_values": {},
             "ignored_fields": ignored, "unresolved_fields": []}
 
 
@@ -195,6 +206,14 @@ def merge_rules(template, profile: Mapping[str, Any] | None, suggestion: Mapping
             same["hide_parent_values"] = list(dict.fromkeys([
                 *(same.get("hide_parent_values") or []), *(item.get("hide_parent_values") or []),
             ]))
+    styles = list(merged.get("style_mappings") or [])
+    style_labels = {_norm(item.get("source_key")) for item in styles}
+    for item in suggestion.get("style_mappings") or []:
+        if _norm(item.get("source_key")) not in style_labels | known:
+            styles.append(copy.deepcopy(dict(item)))
+            style_labels.add(_norm(item.get("source_key")))
+    colors = dict(suggestion.get("color_values") or {})
+    colors.update(merged.get("color_values") or {})
     ignored_now = _ignored_labels({"ignored_fields": [*(merged.get("ignored_fields") or []),
                                                      *(suggestion.get("ignored_fields") or [])]})
     gaps = [item for item in open_fields
@@ -208,6 +227,8 @@ def merge_rules(template, profile: Mapping[str, Any] | None, suggestion: Mapping
                 known.add(_norm(item.get("source_key")))
     merged["text_mappings"] = text
     merged["selector_mappings"] = selectors
+    merged["style_mappings"] = styles
+    merged["color_values"] = colors
     merged["ignored_fields"] = list(dict.fromkeys([
         *(merged.get("ignored_fields") or []), *(suggestion.get("ignored_fields") or []),
     ]))
@@ -227,7 +248,8 @@ def check_candidate(template, row, cfg: Mapping[str, Any], template_dir: str,
     _, uncovered = field_coverage(template, parsed, candidate)
     # Text fields already report precise errors from the text check above.
     errors.extend(f"字段「{item['label']}」({item['value']}) 没有对应的图层规则"
-                  for item in uncovered if not text_rules.classify_field(item["label"]))
+                  for item in uncovered
+                  if not text_rules.classify_field(item["label"]) and item["kind"] not in text_rules.STYLE_LABELS)
     return list(dict.fromkeys(errors))
 
 

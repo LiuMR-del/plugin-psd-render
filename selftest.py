@@ -1271,8 +1271,29 @@ def test_aluminum_order_automation():
           "订单尺寸优先使用厘米规格")
     check(order_intake.parse_size("12x8 in").key == "31x20",
           "无厘米规格时英寸换算为严格方向尺寸")
-    check(order_intake.parse_size("30-20") is None,
-          "无单位订单尺寸不会被猜测解析")
+    check(order_intake.parse_size("30-20").written_key == "30x20",
+          "无单位订单尺寸按写的数字解析")
+    for raw in ('50"x60"', "50“x60“", "50″x60″", "50x60", "50×60", "50-60", "50 x 60 inches"):
+        size = order_intake.parse_size(raw)
+        check(size is not None and size.written_key == "50x60", f"毛毯尺寸写法 {raw} 按数字解析为 50x60")
+    check(order_intake.parse_size('60"x50"').written_key == "60x50", "英寸引号写法保留方向")
+    check(order_intake.parse_size("12×16inch(30×40cm)").written_key == "30x40",
+          "铝板画尺寸列有厘米时仍按厘米数字")
+    blanket = templates.Template(sku="SJS-mt", name="SJS-mt（50×60）", field_value="", path="",
+                                 filename="SJS-mt（50×60）.psd", size_key="50x60")
+    aluminum = templates.Template(sku="HJ-al", name="HJ-al(31×20cm)", field_value="", path="",
+                                  filename="HJ-al(31×20cm).psd", size_key="31x20")
+    blanket_index = {"SJS-mt": [blanket], "HJ-al": [aluminum]}
+
+    def order_keys(raw):
+        return order_intake.NormalizedOrder(None, 1, "", order_intake.parse_size(raw)).size_keys
+
+    check(templates.pick_by_size(blanket_index, "SJS-mt", order_keys('50"x60"')) == [blanket],
+          '订单 50"x60" 匹配模板 (50×60)，不做英寸换算')
+    check(templates.pick_by_size(blanket_index, "SJS-mt", order_keys('60"x50"')) == [],
+          "方向不同不匹配")
+    check(templates.pick_by_size(blanket_index, "HJ-al", order_keys("12x8 in")) == [aluminum],
+          "按数字匹配不到时仍用英寸换算后的厘米尺寸兜底")
     check(templates.parse_template_filename("HJ-lbh670916301(20-30)有篝火.psd") ==
           ("HJ-lbh670916301", "20x30", "有篝火", ""),
           "平铺模板文件名解析 SKU、严格尺寸和说明")

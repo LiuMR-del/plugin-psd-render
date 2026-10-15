@@ -22,7 +22,7 @@ import sys
 import threading
 import traceback
 import uuid
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import flet as ft
 
@@ -31,12 +31,14 @@ import ai_mapping
 import ai_runtime
 import custom_fields
 import excel_data
+import excel_marker
 import font_installer
 import image_assets
 import library_cleanup
 import order_intake
 import order_analysis
 import order_pipeline
+import output_layout
 import renderer
 import settings
 import template_profiles
@@ -600,6 +602,9 @@ def main(page: ft.Page):
 
     output_dir_field = ft.TextField(label="输出目录", value=cfg.get("output_dir", ""),
                                     read_only=True, expand=True, dense=True)
+    # 图片放在 输出目录/日期/店铺/品类/ 下；品类默认取订单表文件名（去掉开头日期）
+    category_field = ft.TextField(label="品类文件夹", width=160, dense=True,
+                                  tooltip="图片保存到 输出目录/日期/店铺名/品类/；默认取订单表文件名，可修改")
     output_name_column_field = ft.TextField(
         label="图片命名 Excel 列（可选）",
         value=cfg.get("output_name_column", ""),
@@ -698,7 +703,7 @@ def main(page: ft.Page):
             vf = variant_field_for(order.sku)
             variant = order.row.values.get(vf, "") if vf else ""
             matches = (
-                templates.pick_by_size(index, order.sku, order.size_key, variant)
+                templates.pick_by_size(index, order.sku, order.size_keys, variant)
                 if order.size_key else templates.pick(index, order.sku, variant)
             )
             if not matches:
@@ -928,7 +933,7 @@ def main(page: ft.Page):
             normalized = normalized_order_for(row)
             if not normalized or not normalized.size_key:
                 return []
-            return templates.pick_by_size(state["index"], row.sku, normalized.size_key, field_value)
+            return templates.pick_by_size(state["index"], row.sku, normalized.size_keys, field_value)
         return templates.pick(state["index"], row.sku, field_value)
 
     def aliases_for(sku: str) -> dict:
@@ -2565,6 +2570,7 @@ def main(page: ft.Page):
         state["excel"] = data
         state["excel_path"] = path
         state["selected_rows"] = set()
+        category_field.value = output_layout.category_from_excel(path)
         # Materialize the raw customization dictionary into the same values
         # map consumed by the original selector/text rendering pipeline.
         for row in data.rows:
@@ -3069,10 +3075,23 @@ def main(page: ft.Page):
     def _pending_card(template: templates.Template, signature: str, pending: dict, title: ft.Control) -> ft.Control:
         candidate = dict(pending.get("candidate") or {})
         fields = list(pending.get("fields") or [])
-        text_items = [item for item in fields if text_rules.classify_field(item["label"])]
-        mapped = {" ".join(str(item.get("source_key") or "").split()).casefold(): item
-                  for item in candidate.get("text_mappings") or []}
+
+        def norm(value) -> str:
+            return " ".join(str(value or "").split()).casefold()
+
+        # Fields AI already ignored or turned into layer switches are not text.
+        settled = order_analysis._ignored_labels(candidate) | {  # noqa: SLF001 - same parsing on purpose
+            norm(item.get("source_key")) for item in candidate.get("selector_mappings") or []}
+        text_items = [item for item in fields
+                      if text_rules.classify_field(item["label"])
+                      or (item.get("kind") not in ("material", *text_rules.STYLE_LABELS)
+                          and norm(item["label"]) not in settled)]
+        color_items = [item for item in fields
+                       if item.get("kind") == text_rules.STYLE_COLOR and not text_rules.color_hex(item["value"])]
+        known_colors = {norm(name): value for name, value in (candidate.get("color_values") or {}).items()}
+        mapped = {norm(item.get("source_key")): item for item in candidate.get("text_mappings") or []}
         text_rows: list[tuple[dict, ft.TextField]] = []
+        color_rows: list[tuple[dict, ft.TextField]] = []
         controls: list[ft.Control] = [title]
         if pending.get("message"):
             controls.append(ft.Text(pending["message"], size=11, color=ft.Colors.ON_SURFACE_VARIANT))
@@ -3097,7 +3116,13 @@ def main(page: ft.Page):
             ) or "模板没有可见文字图层"
             controls.append(ft.Text("可选文字图层：\n" + layer_lines, size=11, selectable=True,
                                     color=ft.Colors.ON_SURFACE_VARIANT))
-        other = [item for item in fields if not text_rules.classify_field(item["label"])]
+        for item in color_items:
+            color_field = ft.TextField(value=known_colors.get(norm(item["value"]), ""), dense=True,
+                                       label=f"{item['label']}（{item['value']}）的色值，如 #FFB6C1，留空 = 不改颜色")
+            color_rows.append((item, color_field))
+            controls.append(color_field)
+        shown = {id(item) for item in (*text_items, *color_items)}
+        other = [item for item in fields if id(item) not in shown]
         if other:
             controls.append(ft.Text(
                 "其他待处理字段（审核通过后，没有图层规则的将不参与出图）：" +
@@ -3117,16 +3142,28 @@ def main(page: ft.Page):
                 texts.append({
                     "section": item["section"], "source_key": item["label"],
                     "field_key": order_pipeline.serialize_field_key(item["section"], item["label"]),
-                    "kind": text_rules.classify_field(item["label"]),
+                    "kind": text_rules.classify_field(item["label"]) or text_rules.TEXT,
                     "smart_object_path": smart_path, "target_path": target_path,
                     "confidence": 1.0, "source": "review",
                 })
             final["text_mappings"] = texts
+            colors = dict(final.get("color_values") or {})
+            for item, color_field in color_rows:
+                hex_value = text_rules.normalize_hex(color_field.value)
+                if not str(color_field.value or "").strip():
+                    ignored.append(item["label"])
+                elif not hex_value:
+                    alert("色值格式不对", f"「{item['label']}」的色值请写成 #RRGGBB，例如 #FFB6C1")
+                    return
+                else:
+                    colors[item["value"]] = hex_value
+            final["color_values"] = colors
             row = excel_data.ExcelRow(int(pending.get("row_no") or 0), str(pending.get("sku") or template.sku),
                                       custom_info=str(pending.get("custom_info") or ""))
             parsed = order_pipeline.parse_fields(row.custom_info)
             _, still = order_analysis.field_coverage(template, parsed, {**final, "ignored_fields": ignored})
-            ignored.extend(item["label"] for item in still if not text_rules.classify_field(item["label"]))
+            ignored.extend(item["label"] for item in still
+                           if not text_rules.classify_field(item["label"]) and item["kind"] not in text_rules.STYLE_LABELS)
             final["ignored_fields"] = list(dict.fromkeys(ignored))
             problems = order_analysis.check_candidate(template, row, cfg, template_dir_field.value, final)
             if problems:
@@ -3243,6 +3280,7 @@ def main(page: ft.Page):
             content=ft.Column([
                 ft.Row([
                     output_dir_field,
+                    category_field,
                     ft.OutlinedButton("选择输出目录", icon=ft.Icons.FOLDER_OPEN, height=36,
                                       style=compact_button_style, on_click=on_pick_output_directory),
                     start_generation_btn,
@@ -4319,10 +4357,12 @@ def main(page: ft.Page):
         body = [ft.Text(f"成功: {success_images} 张"), ft.Text(f"失败: {failed_rows} 行")]
         if skipped_rows:
             body.append(ft.Text(f"未生成（缺模板/待审核等）: {skipped_rows} 行"))
+        folder = os.path.dirname(log_path or report_path or "") or output_dir_field.value
+        body.append(ft.Text(f"图片在 {folder} 下，按 店铺名/品类 分文件夹"))
         if report_path:
-            body.append(ft.Text(f"{os.path.basename(report_path)} 已写入输出目录"))
+            body.append(ft.Text(f"{os.path.basename(report_path)} 已写入该文件夹"))
         if log_path:
-            body.append(ft.Text(f"{os.path.basename(log_path)} 已写入输出目录"))
+            body.append(ft.Text(f"{os.path.basename(log_path)} 已写入该文件夹"))
         dlg = ft.AlertDialog(title=ft.Text("生成完成"), content=ft.Column(body, tight=True))
         dlg.actions = [
             ft.TextButton(
@@ -4330,7 +4370,7 @@ def main(page: ft.Page):
                 icon=ft.Icons.FOLDER_OPEN,
                 height=36,
                 style=text_button_style,
-                on_click=lambda e: open_in_file_manager(output_dir_field.value),
+                on_click=lambda e: open_in_file_manager(folder),
             ),
             ft.TextButton(
                 "关闭",
@@ -4347,7 +4387,7 @@ def main(page: ft.Page):
             if not normalized or not normalized.size_key:
                 return [], [f"Excel 第 {row.row_no} 行尺寸无法解析，不能选择模板"]
             candidates = templates.pick_by_size(
-                state["index"], row.sku, normalized.size_key, field_value,
+                state["index"], row.sku, normalized.size_keys, field_value,
             )
             if not candidates:
                 return [], [
@@ -4429,8 +4469,8 @@ def main(page: ft.Page):
                 )
         return notes
 
-    def write_render_log(out_dir: str, records: list[dict]) -> str:
-        log_path = os.path.join(out_dir, "生成日志.csv")
+    def write_render_log(out_dir: str, records: list[dict], category: str = "") -> str:
+        log_path = os.path.join(out_dir, f"生成日志-{category}.csv" if category else "生成日志.csv")
         with open(log_path, "w", newline="", encoding="utf-8-sig") as f:
             writer = csv.DictWriter(
                 f,
@@ -4482,9 +4522,32 @@ def main(page: ft.Page):
             log("Photoshop 已退出，生成时会自动重新打开")
         state["fonts_need_ps_restart"] = False
 
+    def mark_generated_rows(row_numbers: set[int]) -> None:
+        """Fill the rows that were fully generated yellow in the order workbook (backup first)."""
+        path = state.get("excel_path") or ""
+        if not row_numbers or not path:
+            return
+        lock = excel_marker.lock_file(path)
+        try:
+            result = excel_marker.mark_rows(path, row_numbers)
+        except Exception as exc:  # noqa: BLE001 - marking must never lose the images already made
+            log(f"⚠ 订单表标黄失败（{exc}）：如果表格正在 WPS/Excel 中打开，请关闭后重新生成；"
+                f"已生成的行号：{'、'.join(map(str, sorted(row_numbers)))}", error=True)
+            return
+        log(f"订单表已把生成成功的 {len(result['marked'])} 行标黄（原表备份：{result['backup']}）")
+        if lock:
+            log("⚠ 订单表正在 WPS/Excel 中打开：请关闭后重新打开查看标记，不要在之前打开的窗口里保存，否则会覆盖标记",
+                error=True)
+
     def run_render():
         excel = state["excel"]
-        out_dir = output_dir_field.value
+        root_dir = output_dir_field.value
+        run_day = date.today()
+        out_dir = output_layout.day_dir(root_dir, run_day)
+        os.makedirs(out_dir, exist_ok=True)
+        category = output_layout.folder_name(category_field.value, "") or \
+            output_layout.category_from_excel(state.get("excel_path") or "")
+        generated_rows: set[int] = set()
         prepare_fonts_before_render()
         name_column = str(output_name_column_field.value or "").strip()
         scope = render_rows()
@@ -4516,7 +4579,7 @@ def main(page: ft.Page):
                 reasons[label] = reasons.get(label, 0) + 1
             if not_ready:
                 detail = "、".join(f"{label} {count} 条" for label, count in reasons.items())
-                log(f"本次只生成 {len(rows)} 条可生成订单；跳过 {len(not_ready)} 条（{detail}），明细见 失败报告.csv")
+                log(f"本次只生成 {len(rows)} 条可生成订单；跳过 {len(not_ready)} 条（{detail}），明细见 失败报告-{category}.csv")
         skipped_rows = len(scope) - len(rows)
         total = len(rows)
         log_path = None
@@ -4614,9 +4677,11 @@ def main(page: ft.Page):
                                     tpl, row, vf, custom_resolution.replacements,
                                 )
                                 image_replacements = build_image_render_params(tpl, row)
+                            target_dir = output_layout.row_dir(root_dir, row, category, run_day)
+                            os.makedirs(target_dir, exist_ok=True)
                             result = renderer.render(
                                 tpl.path, {},
-                                os.path.join(out_dir, name),
+                                os.path.join(target_dir, name),
                                 visibility_actions=visibility_actions,
                                 path_replacements=all_path_replacements,
                                 smart_object_text_replacements=smart_object_text_replacements,
@@ -4630,6 +4695,7 @@ def main(page: ft.Page):
                             success_images += 1
                             if result.get("photoshopStartupSeconds", 0) >= 10:
                                 log(f"[{i}] Photoshop 启动用时 {result['photoshopStartupSeconds']:.0f} 秒")
+                            name = os.path.relpath(os.path.join(target_dir, name), out_dir)
                             log(f"[{i}] SKU {row.sku} · {tpl.filename} → {name}"
                                 f"（{result.get('elapsedSeconds', 0):.0f} 秒）")
                             for warning_text in result.get("fontWarnings", []):
@@ -4674,6 +4740,8 @@ def main(page: ft.Page):
                             log(f"[{i}] ✗ SKU {row.sku} · {tpl.filename} 失败: {e}", error=True)
                     if row_failed:
                         failed_rows += 1
+                    else:
+                        generated_rows.add(row.row_no)
                 progress.value = i / total if total else 1
                 progress_text.value = f"{i} / {total} 行 · 成功 {success_images} 张 · 失败 {failed_rows} 行"
                 page.update()
@@ -4682,25 +4750,26 @@ def main(page: ft.Page):
             failures.sort(key=lambda item: item[0])
             # Always rewrite the report so a previous run's failures never
             # linger next to a fully successful re-run.
-            failure_report = os.path.join(out_dir, "失败报告.csv")
+            failure_report = os.path.join(out_dir, f"失败报告-{category}.csv")
             with open(failure_report, "w", newline="", encoding="utf-8-sig") as f:
                 writer = csv.writer(f)
                 writer.writerow(["行号", "SKU", "原因"])
                 writer.writerows(failures)
             if failures:
                 report_path = failure_report
-            log_path = write_render_log(out_dir, render_records)
+            log_path = write_render_log(out_dir, render_records, category)
             task_title.value = "生成完成"
             show_summary(success_images, failed_rows, report_path, log_path, skipped_rows)
         except Exception:  # noqa: BLE001
             log("发生未预期错误:\n" + traceback.format_exc(), error=True)
             try:
-                log_path = write_render_log(out_dir, render_records)
+                log_path = write_render_log(out_dir, render_records, category)
                 log(f"已写入生成日志: {log_path}")
             except Exception as e:  # noqa: BLE001
                 log(f"写入生成日志失败: {e}", error=True)
             task_title.value = "任务异常中止"
         finally:
+            mark_generated_rows(generated_rows)
             state["running"] = False
             back_btn.disabled = False
             page.update()
@@ -4725,7 +4794,7 @@ def main(page: ft.Page):
             row_count = f"共 {len(excel.rows)} 行，生成其中可生成的 {ready} 行"
         task_subtitle.value = (
             f"{os.path.basename(state['excel_path'])} · {row_count}"
-            f"（{mode}）→ {output_dir_field.value}"
+            f"（{mode}）→ {output_layout.day_dir(output_dir_field.value)}"
         )
         log_list.controls.clear()
         progress.value = 0

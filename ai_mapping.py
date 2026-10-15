@@ -72,12 +72,16 @@ def validate_mapping_suggestion(suggestion: dict, template, *, min_confidence: f
     accepted_selectors: list[dict] = []
     accepted_images: list[dict] = []
 
-    # Text suggestions are only for name/year fields the local rules could
-    # not resolve; each must target an existing text layer of matching role.
+    # Text suggestions: name/year fields the local rules could not resolve and
+    # other fields whose value is written as text (Initial, Sunrise...); each
+    # must target an existing text layer (name/year of matching role).
     for raw in suggestion.get("text_mappings") or []:
         if not isinstance(raw, dict):
             continue
         source_key = str(raw.get("source_key") or "").strip()
+        if text_rules.style_kind(source_key) or text_rules._tokens(source_key) & text_rules.NOT_TEXT_CONTENT_WORDS:  # noqa: SLF001
+            errors.append(f"字段「{source_key}」不是要写入的文字内容，已丢弃文字映射")
+            continue
         section = str(raw.get("section") or "").strip()
         target = _path(raw.get("target_path"))
         smart_path = _path(raw.get("smart_object_path"))
@@ -89,7 +93,7 @@ def validate_mapping_suggestion(suggestion: dict, template, *, min_confidence: f
         item = {
             "source_key": source_key, "section": section,
             "field_key": text_rules.field_key(section, source_key),
-            "kind": text_rules.classify_field(source_key),
+            "kind": text_rules.classify_field(source_key) or text_rules.TEXT,
             "target_path": target,
             **({"smart_object_path": smart_path} if smart_path else {}),
             "confidence": float(raw.get("confidence") or 0),
@@ -152,6 +156,45 @@ def validate_mapping_suggestion(suggestion: dict, template, *, min_confidence: f
                 "auto_approved": confidence >= min_confidence,
             })
 
+    # Text colour / font fields: which text layers they apply to (empty = the
+    # name layers), and hex values for colour names the order gives no hex for.
+    visible_text = {
+        (tuple(layer["smart_object_path"]), tuple(layer["target_path"]))
+        for layer in text_rules.text_layers(template)
+    }
+    accepted_styles: list[dict] = []
+    for raw in suggestion.get("style_mappings") or []:
+        if not isinstance(raw, dict):
+            continue
+        source_key = str(raw.get("source_key") or "").strip()
+        style = str(raw.get("style") or "").strip()
+        if not source_key or style not in text_rules.STYLE_LABELS:
+            errors.append(f"文字样式映射无效: {source_key} ({style})")
+            continue
+        targets = []
+        for target in raw.get("targets") or []:
+            if not isinstance(target, dict):
+                continue
+            key = (tuple(_path(target.get("smart_object_path"))), tuple(_path(target.get("target_path"))))
+            if key in visible_text:
+                targets.append({"smart_object_path": list(key[0]), "target_path": list(key[1])})
+            else:
+                errors.append(f"文字样式目标不是可见文字图层: {source_key} -> " + "/".join(key[0] + key[1]))
+        section = str(raw.get("section") or "").strip()
+        accepted_styles.append({
+            "source_key": source_key, "section": section,
+            "field_key": text_rules.field_key(section, source_key),
+            "style": style, "targets": targets, "source": "ai",
+        })
+    accepted_colors: dict[str, str] = {}
+    raw_colors = suggestion.get("color_values")
+    for name, value in (raw_colors.items() if isinstance(raw_colors, dict) else []):
+        hex_value = text_rules.normalize_hex(value)
+        if str(name).strip() and hex_value:
+            accepted_colors[str(name).strip()] = hex_value
+        else:
+            errors.append(f"颜色色值无效: {name} -> {value}")
+
     normalized_fields = _field_map(suggestion.get("normalized_fields"))
     field_types_raw = suggestion.get("field_types")
     field_types = {
@@ -168,6 +211,8 @@ def validate_mapping_suggestion(suggestion: dict, template, *, min_confidence: f
         "person_style_mappings": accepted_selectors,
         "selector_mappings": accepted_selectors,
         "image_mappings": accepted_images,
+        "style_mappings": accepted_styles,
+        "color_values": accepted_colors,
         "ignored_fields": [str(item).strip() for item in suggestion.get("ignored_fields") or [] if str(item).strip()],
         "unresolved_fields": [str(item).strip() for item in suggestion.get("unresolved_fields") or [] if str(item).strip()],
     }
