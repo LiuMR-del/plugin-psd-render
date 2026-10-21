@@ -8,6 +8,7 @@ rem   3. 依赖缺失或 requirements.txt 有变化时重装; 官方源失败时
 rem   4. 检查 Photoshop, 没装只提示(仍可打开程序审核模板)
 rem 带参数 selfcheck 时(Windows自检.bat)环境就绪后运行 windows_selfcheck.py, 而不是打开程序
 rem 注意: 本文件须保持 CRLF 换行; 主流程只用 goto, 不用括号代码块(块内中文括号、变量展开易出错)
+rem requirements.txt 只写英文: 中文 Windows 上 pip 按 GBK 读它; 装依赖时另设 PYTHONUTF8=1 兜底
 setlocal EnableExtensions
 cd /d "%~dp0"
 
@@ -100,6 +101,12 @@ exit /b 1
 
 :pip_install
 echo 安装/更新依赖（需联网）...
+set "PYTHONUTF8=1"
+call :pip_try
+set "PIP_TRY_RC=%errorlevel%"
+set "PYTHONUTF8="
+exit /b %PIP_TRY_RC%
+:pip_try
 %VENV_PY% -m pip install %PIP_ARGS% && exit /b 0
 for %%i in (https://pypi.tuna.tsinghua.edu.cn/simple https://mirrors.aliyun.com/pypi/simple/) do echo 改用镜像 %%i 重试... & %VENV_PY% -m pip install -i %%i %PIP_ARGS% && exit /b 0
 exit /b 1
